@@ -53,19 +53,32 @@ object Parser {
     val tokens: CommonTokenStream = new CommonTokenStream(lexer)
     val parser: ShExDocParser = new ShExDocParser(tokens)
     val maker = new SchemaMaker()
-    maker.visit(parser.shExDoc()) match {
-      case s: Schema => Right(s)
-      case e => Left(s"Unknown type of value $e")
-    }
+    val builder = maker.visit(parser.shExDoc()).asInstanceOf[Builder[Schema]]
+    run(builder)._2
   }
 
  class SchemaMaker extends ShExDocBaseVisitor[Any] {
-   type Start = Option[ShapeExpr]
-   type NotStartAction = Either[Start,Shape]
 
-   override def visitShExDoc(ctx: ShExDocParser.ShExDocContext): Builder[Schema] = ???
+   override def visitShExDoc(
+     ctx: ShExDocParser.ShExDocContext): Builder[Schema] = {
+    for {
+      directives <- {
+        val r: List[Builder[Directive]] =
+          ctx.directive().asScala.map(visitDirective(_)).toList
+        r.sequence
+      }
+      startActions <- visitStartActions(ctx.startActions())
+      prefixMap <- getPrefixMap
+      base <- getBase
+    } yield {
+      Schema.empty.copy(
+        prefixes = if (!prefixMap.isEmpty) Some(prefixMap) else None,
+        base = base,
+        startActs = startActions
+      )
+    }
 /*     for {
-       startDirectives <- ctx.directive().asScala.map(visitDirective(_)).toList.sequence
+       startDirectives <-
        notStartAction <-
          if (isDefined(ctx.notStartAction())) {
          visitNotStartAction(ctx.notStartAction())
@@ -75,25 +88,123 @@ object Parser {
            prefixes = if (prefixes.isEmpty) None else Some(prefixes),
            base = base
          )
-   } */
+    }  */
+   }
 
-   override def visitNotStartAction(ctx: ShExDocParser.NotStartActionContext): Builder[NotStartAction] = {
-     ???
+   type Start = Option[(ShapeExpr, List[SemAct])]
+   type NotStartAction = Either[Start,(ShapeLabel,ShapeExpr)]
+
+   override def visitNotStartAction(
+     ctx: ShExDocParser.NotStartActionContext
+   ): Builder[NotStartAction] = {
+     if (isDefined(ctx.start())) {
+       for {
+         s <- visitStart(ctx.start())
+       } yield Left(s)
+     } else {
+       for {
+        s <- visitShape(ctx.shape())
+      } yield Right(s)
+     }
+   }
+
+
+   override def visitStartActions(ctx: ShExDocParser.StartActionsContext): Builder[Option[List[SemAct]]] = {
+     if (isDefined(ctx)) {
+         val r: List[Builder[SemAct]] =
+           ctx.codeDecl().asScala.map(visitCodeDecl(_)).toList
+         r.sequence.map(Some(_))
+     } else ok(None)
+   }
+
+   override def visitCodeDecl(
+    ctx: ShExDocParser.CodeDeclContext): Builder[SemAct] =
+      for {
+       iri <- visitIri(ctx.iri())
+     } yield {
+      val code: Option[String] =
+        if (isDefined(ctx.CODE()))
+          Some(ctx.CODE().getText())
+        else
+          None
+      SemAct(iri,code)
+    }
+
 /*     if (ctx.start() != null) {
        Left(visitStart(ctx.start()))
      } else {
        Right(visitShape(ctx.shape()))
      } */
+
+   override def visitStart(
+     ctx: ShExDocParser.StartContext):
+       Builder[Option[(ShapeExpr,List[SemAct])]] = {
+     if (isDefined(ctx)) {
+       ???
+     } else
+       ok(None)
    }
 
-   override def visitStart(ctx: ShExDocParser.StartContext): Option[ShapeExpr] = {
-     ???
-   }
-
-   override def visitShape(ctx: ShExDocParser.ShapeContext): Builder[ShapeLabel] =
+   override def visitShape(ctx: ShExDocParser.ShapeContext): Builder[(ShapeLabel,ShapeExpr)] =
     for {
      label <- visitShapeLabel(ctx.shapeLabel())
-   } yield label
+     shapeExpr <- obtainShapeExpr(ctx)
+   } yield (label,shapeExpr)
+
+   def obtainShapeExpr(ctx: ShExDocParser.ShapeContext): Builder[ShapeExpr] =
+     if (isDefined(ctx.KW_EXTERNAL())) {
+       ok(ShapeExternal()) // TODO: What happens if there are semantic actions after External??
+     } else
+      // TODO: Obtain stringFacet*
+       visitShapeExpression(ctx.shapeExpression())
+
+   override def visitShapeExpression(
+     ctx: ShExDocParser.ShapeExpressionContext):
+       Builder[ShapeExpr] =
+         visitShapeDisjunction(ctx.shapeDisjunction())
+
+   override def visitShapeDisjunction(
+           ctx: ShExDocParser.ShapeDisjunctionContext):
+             Builder[ShapeExpr] = for {
+      shapes <- {
+        val r: List[Builder[ShapeExpr]] =
+          ctx.shapeConjunction().asScala.map(visitShapeConjunction(_)).toList
+        r.sequence
+      }
+   } yield if (shapes.length == 1) shapes.head
+        else ShapeOr(shapes)
+
+   override def visitShapeConjunction(
+           ctx: ShExDocParser.ShapeConjunctionContext):
+             Builder[ShapeExpr] = { for {
+     shapes <- {
+       val r: List[Builder[ShapeExpr]] =
+         ctx.negShapeAtom().asScala.map(visitNegShapeAtom(_)).toList
+       r.sequence
+     }
+   } yield if (shapes.length == 1) shapes.head
+        else ShapeOr(shapes)
+   }
+
+   override def visitNegShapeAtom(
+           ctx: ShExDocParser.NegShapeAtomContext):
+             Builder[ShapeExpr] = for {
+    shapeAtom <- visitShapeAtom(ctx.shapeAtom())
+   } yield shapeAtom // TODO: Handle negation
+
+   override def visitShapeAtom(
+     ctx: ShExDocParser.ShapeAtomContext):
+       Builder[ShapeExpr] = {
+    ctx match {
+      case s: ShExDocParser.ShapeAtomLiteralContext => ???
+      case s: ShExDocParser.ShapeAtomNonLiteralContext => ???
+      case s: ShExDocParser.ShapeAtomDataTypeContext => ???
+      case s: ShExDocParser.ShapeAtomGroupContext => ???
+      case s: ShExDocParser.ShapeAtomValueSetContext => ???
+      case s: ShExDocParser.ShapeAtomShapeExpressionContext => ???
+      case s: ShExDocParser.ShapeAtomAnyContext => ???
+    }
+   }
 
    def isDefined[A](x:A): Boolean =
      if (x != null) true
@@ -162,22 +273,23 @@ object Parser {
      ds.foldLeft(zero)(comb)
    }
 
-   def getBase(ds: List[Directive]): Option[IRI] = {
+/*   def getBase(ds: List[Directive]): Option[IRI] = {
      def comb(rest: Option[IRI],x: Directive): Option[IRI] = {
        x.fold(_ => rest, iri => combineBase(rest,iri))
      }
      def zero: Option[IRI] = None
      ds.foldLeft(zero)(comb)
-   }
+   } */
 
-   def combineBase(rest: Option[IRI], iri: IRI): Option[IRI] = {
+/*   def combineBase(rest: Option[IRI], iri: IRI): Option[IRI] = {
      rest match {
        case None => Some(iri)
        case Some(i) => Some(iri) // Combine if iri is a relative IRI?
      }
-   }
+   } */
 
-   override def visitDirective(ctx: ShExDocParser.DirectiveContext): Builder[Directive] ={
+   override def visitDirective(
+     ctx: ShExDocParser.DirectiveContext): Builder[Directive] ={
      if (ctx.baseDecl() != null) {
        for {
          iri <- visitBaseDecl(ctx.baseDecl())
