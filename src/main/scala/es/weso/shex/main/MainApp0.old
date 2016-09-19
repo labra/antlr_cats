@@ -1,0 +1,37 @@
+package es.weso.shex.main
+
+import es.weso.shex.parser._
+import org.antlr.v4.runtime._
+import org.antlr.v4.runtime.tree._
+
+object MainApp {
+  def main(args: Array[String]): Unit = {
+        var inputText: String = """
+        |prefix : <http://example.org/>
+        |start = :S
+        |:S {
+        | :p [ 1 2 ]
+        |}
+        |""".stripMargin
+
+        if (args.length > 0) {
+            inputText = args(0)
+        }
+
+        // create a CharStream that reads from standard input
+        val input: ANTLRInputStream = new ANTLRInputStream(inputText)
+
+        // create a lexer that feeds off of input CharStream
+        val lexer: ShExDocLexer = new ShExDocLexer(input)
+
+        // create a buffer of tokens pulled from the lexer
+        val tokens: CommonTokenStream = new CommonTokenStream(lexer)
+
+        // create a parser that feeds off the tokens buffer
+        val parser: ShExDocParser = new ShExDocParser(tokens)
+
+        val tree: ParseTree = parser.shExDoc() // begin parsing at init rule
+        println(tree.toStringTree(parser)) // print LISP-style tree
+    }
+
+}
